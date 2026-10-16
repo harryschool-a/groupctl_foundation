@@ -1,3 +1,16 @@
+## 1. PUB (Publish)
+**Trigger:** User types exactly `PUB`
+**Procedure:**
+1. Stage all uncommitted event files using `git add .group/events/`.
+2. Commit the changes with a message like `chore(events): publish collaboration events`.
+3. Push the commit to the remote repository using `git push`.
+
+## 2. SYNC (Synchronize)
+**Trigger:** User types exactly `SYNC`
+**Procedure:**
+1. Pull the latest events from the remote repository using `git pull`.
+2. Run `python groupctl.py validate` to ensure the downloaded events are valid.
+
 ## 3. REV (Review)
 **Trigger:** User types `REV <change_id>`
 **Procedure:**
@@ -15,6 +28,7 @@
 3. Save this payload to a temporary file (e.g., `local_integration.json`).
 4. Run `python groupctl.py event-create --event-type integration_result --payload-file local_integration.json`.
 5. Execute the `PUB` workflow to automatically commit and push the new integration event.
+
 ## 5. TEST (Test)
 **Trigger:** User types `TEST` or `TEST <scope>`
 **Procedure:**
@@ -31,6 +45,7 @@
 2. Run `python groupctl.py validate` to check the group configuration.
 3. Run `python groupctl.py events` to list all known collaboration events.
 4. Provide a summarized report of the repository health, pending changes, and collaboration events to the user.
+
 ## 7. FINAL (Finalization)
 **Trigger:** User types `FINAL <canonical_commit>` or exactly `FINAL`
 **Procedure:**
