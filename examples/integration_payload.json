@@ -1,0 +1,11 @@
+{
+  "change_id": "C-12345",
+  "target_branch": "main",
+  "result": "success",
+  "summary": "Successfully merged C-12345 into main without conflicts.",
+  "merge_commit": "abc123def456",
+  "verification": {
+    "syntax_check": "passed",
+    "unit_tests": "passed"
+  }
+}

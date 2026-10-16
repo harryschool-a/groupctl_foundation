@@ -1,0 +1,7 @@
+{
+  "change_id": "C-12345",
+  "verdict": "accept",
+  "summary": "Code looks good. All tests pass and it meets the assignment requirements.",
+  "issues": [],
+  "tests_run": ["unittest", "lint"]
+}
