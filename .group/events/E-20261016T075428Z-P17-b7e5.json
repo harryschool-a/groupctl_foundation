@@ -1,0 +1,17 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261016T075428Z-P17-b7e5",
+  "event_type": "review",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-16T07:54:28Z",
+  "related_events": [],
+  "change_id": "C-12345",
+  "verdict": "accept",
+  "summary": "Code looks good. All tests pass and it meets the assignment requirements.",
+  "issues": [],
+  "tests_run": [
+    "unittest",
+    "lint"
+  ]
+}
