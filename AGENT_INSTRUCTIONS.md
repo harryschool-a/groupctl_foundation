@@ -31,3 +31,11 @@
 2. Run `python groupctl.py validate` to check the group configuration.
 3. Run `python groupctl.py events` to list all known collaboration events.
 4. Provide a summarized report of the repository health, pending changes, and collaboration events to the user.
+## 7. FINAL (Finalization)
+**Trigger:** User types `FINAL <canonical_commit>` or exactly `FINAL`
+**Procedure:**
+1. Determine the intent: if `<canonical_commit>` is provided, the user is proposing a final version. If not, the user is submitting a final approval result.
+2. Generate a valid JSON payload for either a `final_candidate` or `final_result` event based on the intent. Both must include `canonical_commit` and a `summary`.
+3. Save this payload to a temporary file (e.g., `local_final.json`).
+4. Run `python groupctl.py event-create --event-type final_candidate` (or `final_result`) `--payload-file local_final.json`.
+5. Execute the `PUB` workflow to automatically commit and push the final event.
