@@ -1,0 +1,21 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261021T164142Z-P17-d854",
+  "event_type": "review",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-21T16:41:42Z",
+  "related_events": [],
+  "change_id": "C-4acd9c5",
+  "verdict": "accept_with_changes",
+  "summary": "Remote event discovery is well-scoped and read-only. The 16 tests pass, but byte-exact immutability checking and additional negative-case tests are needed before approval.",
+  "issues": [
+    "Hash raw Git blob bytes rather than text-mode output so Windows newline normalization cannot hide content changes.",
+    "Add integration tests for malformed remote events, group_id mismatches, and conflicting contents for the same event ID.",
+    "Move the unittest main guard to the end of tests/test_groupctl.py so direct execution includes RemoteEventTests."
+  ],
+  "tests_run": [
+    "python -m unittest discover -s tests -v: 16 tests passed",
+    "git diff --check: passed"
+  ]
+}
