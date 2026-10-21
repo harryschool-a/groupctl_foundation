@@ -1,0 +1,32 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261021T150745Z-P17-1566",
+  "event_type": "change_published",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-21T15:07:45Z",
+  "related_events": [],
+  "change_id": "C-4acd9c5",
+  "branch": "people/P17/pub-sync",
+  "commit": "4acd9c536a12e4b9f8bc5e88af5def99412de088",
+  "summary": "Added remote event discovery and strengthened collaboration procedures for the local AI agent.",
+  "files_changed": [
+    ".gitignore",
+    "AGENT_INSTRUCTIONS.md",
+    "README.md",
+    "groupctl.py",
+    "tests/test_groupctl.py"
+  ],
+  "interface_changes": [
+    "Added remote-events for inspecting validated events on fetched remote branches.",
+    "Expanded documented procedures for SYNC, PUB, REV, INT, TEST, STATUS, and FINAL."
+  ],
+  "tests_run": [
+    "python -m unittest discover -s tests -v: 16 tests passed",
+    "git diff --check: passed"
+  ],
+  "known_issues": [
+    "The complete three-member workflow, including deliberate conflict resolution and finalization, still needs to be demonstrated."
+  ],
+  "proposed_for_integration": true
+}
