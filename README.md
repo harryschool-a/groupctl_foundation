@@ -1,20 +1,21 @@
 # groupctl foundation — Version 0.1
 
-This project is a starter implementation for the group collaboration assignment. It is a local helper, not a Dispatcher or an autonomous multi-agent system.
+This project is a collaboration helper for several human–AI pairs working in one programming group. It is not the Dispatcher and is not a complete autonomous multi-agent system.
 
-## Included so far
+## Implemented local helper features
 
 - `init`: create the required `.group/` scaffold, group configuration, member descriptor, and placeholder assignment file.
-- `validate`: validate group configuration plus event common envelopes and documented payload fields for event types with explicit schemas in the Version 0.1 contract.
-- `events`: list local event files and report whether their structure validates.
+- `validate`: validate group configuration and local event common envelopes plus the documented event payload fields.
+- `events`: list and validate event files in the current checkout.
 - `event-create`: create a local event from a JSON payload file, adding the common envelope from `.group/group.json` and `.group/members/`.
-- Unit tests for configuration, event validation, event creation, and no-overwrite behavior.
+- `remote-events`: after a Git fetch, inspect event files on fetched remote-tracking branches without checking out those branches or modifying the working tree. Detect malformed events and event-ID content conflicts. An optional local-only checkpoint helps SYNC distinguish events already inspected from newly discovered ones.
+- Unit tests for configuration, event validation/creation, immutable event writes, and remote event discovery using a local Git remote.
 
-The `final_candidate` and `final_result` event payload schemas will be completed together with the `FINAL` workflow because the Version 0.1 event contract names the required concepts but does not fully define those events' payload key names.
+These are low-level implementation helpers. `SYNC`, `PUB`, `INT`, `REV`, `TEST`, `STATUS`, and `FINAL` are human-to-agent prompt commands whose procedures are defined in [`AGENT_INSTRUCTIONS.md`](AGENT_INSTRUCTIONS.md). Do not present them as required shell subcommands.
 
 ## Windows setup
 
-Use Command Prompt or PowerShell in the folder that contains `groupctl.py`.
+Open Command Prompt or PowerShell in the folder that contains `groupctl.py`.
 
 ```cmd
 python -m unittest discover -s tests -v
@@ -27,20 +28,38 @@ Run `init` only once in a repository. If `.group/group.json` already exists, ski
 
 ## Create a local event
 
-Use the included example payload at `examples/finding_payload.json`. Then run:
-
 ```cmd
 python groupctl.py event-create --event-type finding --payload-file examples/finding_payload.json
 python groupctl.py validate
 python groupctl.py events
 ```
 
-When exactly one member descriptor exists, `groupctl` infers the person ID. In a multi-member repository, provide it explicitly, for example `--person-id P17`.
+When exactly one member descriptor exists, `groupctl` infers the person ID. In a multi-member repository, supply `--person-id P17` explicitly. For related events, add `--related-event EVENT_ID`; repeat the option if there are multiple related events.
 
-The `event-create` CLI subcommand is a low-level implementation helper; it is not one of the seven human-to-agent prompt commands. An event created on disk is **not yet published** to the group. The repository contract says it becomes public only after the file is staged, committed, and pushed using Git.
+An event created on disk is **not yet published**. The repository contract says it becomes public only after it is staged, committed, and pushed with Git.
 
-For a related event, add `--related-event EVENT_ID`; repeat the option if there are multiple related events.
+## Discover events on fetched remote branches
 
-## Not implemented yet
+First record local branch/commit/working-tree state and then fetch, as part of the SYNC procedure:
 
-The seven prompt procedures (`SYNC`, `PUB`, `INT <change_id>`, `REV <change_id>`, `TEST [scope]`, `STATUS`, and `FINAL`) are not yet fully implemented. The portable AI-agent instruction file, Git-based publication/synchronization, and finalization workflow remain later milestones.
+```cmd
+git fetch --all --tags --prune
+python groupctl.py remote-events --remote origin --new-only
+```
+
+This command is read-only unless `--mark-seen` is explicitly supplied. It inspects remote-tracking refs such as `origin/people/P17/parser`, so events on a teammate's personal branch can be discovered before their code is merged into the current branch.
+
+After the agent has inspected and summarized all reported events, it may update the local-only checkpoint:
+
+```cmd
+python groupctl.py remote-events --remote origin --mark-seen
+```
+
+The checkpoint is stored under `.group/local/` and is not shared or committed. “Seen” means inspected, not accepted or integrated. Do not checkpoint when the command reports invalid events or immutability conflicts. If your remote is not named `origin`, replace it with the actual remote name.
+
+## Important boundaries
+
+- `.group/group.json` identifies the canonical branch. Do not assume `main` if the configuration differs.
+- Published events are immutable. Correct mistakes with a new related event.
+- `remote-events` reads already-fetched references; it does not run `git fetch` itself and does not change branches.
+- This milestone improves event discovery and agent procedures. It does **not** yet automate the complete `PUB`, `INT`, `REV`, `TEST`, `STATUS`, or `FINAL` workflows end-to-end.

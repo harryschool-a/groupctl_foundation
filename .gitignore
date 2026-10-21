@@ -1,2 +1,4 @@
 .group/local/*
 !.group/local/.gitkeep
+__pycache__/
+*.py[cod]

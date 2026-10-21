@@ -4,16 +4,19 @@
 Implemented milestones:
 - repository initialization;
 - group and event validation;
-- local creation and listing of immutable-format collaboration event files.
+- local creation and listing of immutable-format collaboration event files;
+- read-only discovery of events on already-fetched remote branches with a local-only checkpoint.
 
 Git publication and the human-to-agent workflows (SYNC/PUB/INT/REV/TEST/STATUS/FINAL)
-are implemented separately from these low-level CLI helper commands.
+are guided by AGENT_INSTRUCTIONS.md and use these low-level helpers plus Git.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -431,6 +434,173 @@ def create_event(root: Path, event_type: str, payload: Any, person_id: str | Non
     return event_path
 
 
+
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run a Git command without changing the user's working tree."""
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def _remote_checkpoint_path(root: Path, remote: str) -> Path:
+    """Return a safe local-only checkpoint path for one named Git remote."""
+    if not remote or remote.startswith("-") or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in remote):
+        raise ValueError("Remote name may contain only letters, numbers, underscore, dot, and hyphen.")
+    return root / LOCAL_DIR / f"known_remote_events_{remote}.json"
+
+
+def collect_remote_events(root: Path, remote: str = "origin") -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Read and validate event files from already-fetched remote-tracking branches.
+
+    This deliberately does not fetch or check out branches. SYNC records the local
+    state first, fetches remote refs, and then uses this read-only view to discover
+    events without replacing the current working tree.
+    """
+    root = root.resolve()
+    config = _load_valid_group(root)
+    errors: list[str] = []
+
+    remote_check = _run_git(root, "remote", "get-url", remote)
+    if remote_check.returncode != 0:
+        message = remote_check.stderr.strip() or f"Git remote {remote!r} is not configured."
+        return {}, [message]
+
+    refs_result = _run_git(root, "for-each-ref", "--format=%(refname)", f"refs/remotes/{remote}/")
+    if refs_result.returncode != 0:
+        return {}, [refs_result.stderr.strip() or "Could not list remote-tracking branches."]
+    refs = [ref.strip() for ref in refs_result.stdout.splitlines()
+            if ref.strip() and not ref.strip().endswith("/HEAD")]
+    if not refs:
+        return {}, [f"No fetched remote-tracking branches found for {remote!r}; run git fetch first."]
+
+    # event_id -> validated event plus immutable content digest and all refs carrying it
+    events: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        tree = _run_git(root, "ls-tree", "-r", "--name-only", ref, "--", str(EVENTS_DIR).replace("\\", "/"))
+        if tree.returncode != 0:
+            errors.append(f"Could not inspect {ref}: {tree.stderr.strip()}")
+            continue
+        event_paths = [name.strip() for name in tree.stdout.splitlines()
+                       if name.strip().endswith(".json")
+                       and Path(name.strip()).parent.as_posix() == EVENTS_DIR.as_posix()]
+        for event_path in event_paths:
+            shown = _run_git(root, "show", f"{ref}:{event_path}")
+            if shown.returncode != 0:
+                errors.append(f"Could not read {ref}:{event_path}: {shown.stderr.strip()}")
+                continue
+            raw = shown.stdout
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                errors.append(f"INVALID {ref}:{event_path}: invalid JSON ({exc.msg}, line {exc.lineno})")
+                continue
+            validation_errors = validate_event(data, Path(event_path))
+            if isinstance(data, dict) and data.get("group_id") != config.get("group_id"):
+                validation_errors.append(
+                    f"group_id {data.get('group_id')!r} does not match local group {config.get('group_id')!r}."
+                )
+            if validation_errors:
+                errors.append(f"INVALID {ref}:{event_path}: " + "; ".join(validation_errors))
+                continue
+
+            event_id = data["event_id"]
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if event_id not in events:
+                events[event_id] = {
+                    "data": data,
+                    "sha256": digest,
+                    "refs": [ref],
+                    "path": event_path,
+                }
+            else:
+                previous = events[event_id]
+                if previous["sha256"] != digest:
+                    errors.append(
+                        f"IMMUTABILITY CONFLICT: event {event_id} has different contents on "
+                        f"{', '.join(previous['refs'])} and {ref}."
+                    )
+                else:
+                    previous["refs"].append(ref)
+
+    return events, errors
+
+
+def command_remote_events(args: argparse.Namespace) -> int:
+    """List events in fetched remote branches, optionally checkpointing inspected IDs."""
+    root = Path(args.root).resolve()
+    try:
+        checkpoint_path = _remote_checkpoint_path(root, args.remote)
+        events, errors = collect_remote_events(root, args.remote)
+        known: dict[str, str] = {}
+        if checkpoint_path.is_file():
+            checkpoint = read_json(checkpoint_path)
+            if not isinstance(checkpoint, dict) or checkpoint.get("protocol_version") != PROTOCOL_VERSION:
+                raise ValueError(f"Invalid remote event checkpoint: {checkpoint_path}")
+            raw_known = checkpoint.get("events", {})
+            if not isinstance(raw_known, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in raw_known.items()
+            ):
+                raise ValueError(f"Invalid events mapping in remote event checkpoint: {checkpoint_path}")
+            known = raw_known
+    except (ValueError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    for error in errors:
+        print(f"ERROR: {error}")
+
+    if not events and not errors:
+        print(f"No collaboration events found on fetched branches for remote {args.remote!r}.")
+
+    new_or_changed: list[str] = []
+    for event_id, item in sorted(events.items(), key=lambda pair: (pair[1]["data"].get("created_at", ""), pair[0])):
+        digest = item["sha256"]
+        if event_id not in known:
+            state = "NEW"
+            new_or_changed.append(event_id)
+        elif known[event_id] != digest:
+            state = "CHANGED"
+            new_or_changed.append(event_id)
+            errors.append(f"IMMUTABILITY CONFLICT: previously seen event {event_id} has changed content.")
+        else:
+            state = "KNOWN"
+        if args.new_only and state == "KNOWN":
+            continue
+        event = item["data"]
+        refs = ", ".join(ref.removeprefix(f"refs/remotes/{args.remote}/") for ref in item["refs"])
+        print(f"{state:<7} {event['event_type']:<20} {event_id} (person {event['person_id']}; refs: {refs})")
+
+    if args.new_only and events and not new_or_changed:
+        print("No new remote events since the last local checkpoint.")
+
+    # A checkpoint is local-only and is updated only when explicitly requested.
+    # Refuse to checkpoint an invalid or conflicting view of the event history.
+    if args.mark_seen:
+        if errors:
+            print("Checkpoint not updated because remote events contain validation or immutability errors.", file=sys.stderr)
+            return 1
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        combined = dict(known)
+        combined.update({event_id: item["sha256"] for event_id, item in events.items()})
+        checkpoint = {
+            "protocol_version": PROTOCOL_VERSION,
+            "remote": args.remote,
+            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "events": combined,
+        }
+        checkpoint_path.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"Checkpoint updated: {checkpoint_path.relative_to(root)}")
+
+    return 1 if errors else 0
+
 def command_init(args: argparse.Namespace) -> int:
     root = Path(args.root)
     try:
@@ -584,6 +754,18 @@ def build_parser() -> argparse.ArgumentParser:
     event_create_parser.add_argument("--related-event", action="append", default=[],
                                      help="related event ID; may be supplied multiple times")
     event_create_parser.set_defaults(func=command_event_create)
+
+    remote_events_parser = subparsers.add_parser(
+        "remote-events",
+        help="inspect validated events on already-fetched remote-tracking branches",
+    )
+    remote_events_parser.add_argument("--root", default=".", help="repository root (default: current directory)")
+    remote_events_parser.add_argument("--remote", default="origin", help="Git remote name (default: origin)")
+    remote_events_parser.add_argument("--new-only", action="store_true",
+                                      help="show only events new or changed since the local checkpoint")
+    remote_events_parser.add_argument("--mark-seen", action="store_true",
+                                      help="update the local-only checkpoint after the caller has inspected events")
+    remote_events_parser.set_defaults(func=command_remote_events)
 
     return parser
 

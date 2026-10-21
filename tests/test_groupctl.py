@@ -1,4 +1,8 @@
+import contextlib
+import io
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,3 +158,65 @@ class EventCreationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+@unittest.skipUnless(shutil.which("git"), "Git is required for remote-event integration tests")
+class RemoteEventTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        base = Path(self.temp_dir.name)
+        self.root = base / "work"
+        self.bare = base / "remote.git"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "--bare", str(self.bare)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(["git", "init", "-b", "main", str(self.root)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.git("config", "user.name", "Groupctl Test")
+        self.git("config", "user.email", "groupctl-test@example.invalid")
+        groupctl.initialize_repository(
+            self.root, "G-12", "P17", "Student A", "main",
+            ".group/assignment/assignment.md",
+        )
+        self.git("add", ".")
+        self.git("commit", "-m", "initialize test repository")
+        self.git("remote", "add", "origin", str(self.bare))
+        self.git("push", "--set-upstream", "origin", "main")
+        self.git("checkout", "-b", "people/P17/demo")
+        groupctl.create_event(
+            self.root, "finding",
+            {"summary": "Remote branch event", "evidence": ["Created in an integration test."]},
+            None, [],
+        )
+        self.git("add", ".group/events")
+        self.git("commit", "-m", "publish test event")
+        self.git("push", "--set-upstream", "origin", "people/P17/demo")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.root, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def run_remote_events(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = groupctl.main(["remote-events", "--root", str(self.root), *args])
+        return code, output.getvalue()
+
+    def test_discovers_event_on_remote_personal_branch(self):
+        code, output = self.run_remote_events("--remote", "origin", "--new-only")
+        self.assertEqual(code, 0, output)
+        self.assertIn("NEW", output)
+        self.assertIn("finding", output)
+        self.assertIn("people/P17/demo", output)
+
+    def test_mark_seen_checkpoint_prevents_relisting_known_events(self):
+        code, first = self.run_remote_events("--remote", "origin", "--mark-seen")
+        self.assertEqual(code, 0, first)
+        self.assertIn("Checkpoint updated", first)
+        code, second = self.run_remote_events("--remote", "origin", "--new-only")
+        self.assertEqual(code, 0, second)
+        self.assertIn("No new remote events since the last local checkpoint.", second)
+        self.assertNotIn("finding", second)
