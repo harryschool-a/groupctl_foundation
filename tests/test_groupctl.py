@@ -156,10 +156,6 @@ class EventCreationTests(unittest.TestCase):
             groupctl.write_json(path, {"second": True})
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 @unittest.skipUnless(shutil.which("git"), "Git is required for remote-event integration tests")
 class RemoteEventTests(unittest.TestCase):
     def setUp(self):
@@ -174,6 +170,8 @@ class RemoteEventTests(unittest.TestCase):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.git("config", "user.name", "Groupctl Test")
         self.git("config", "user.email", "groupctl-test@example.invalid")
+        # Keep the test's committed blob bytes exact across Windows/Linux hosts.
+        self.git("config", "core.autocrlf", "false")
         groupctl.initialize_repository(
             self.root, "G-12", "P17", "Student A", "main",
             ".group/assignment/assignment.md",
@@ -192,6 +190,21 @@ class RemoteEventTests(unittest.TestCase):
         self.git("commit", "-m", "publish test event")
         self.git("push", "--set-upstream", "origin", "people/P17/demo")
 
+    def current_event(self):
+        event_path = next((self.root / ".group/events").glob("*.json"))
+        return event_path, json.loads(event_path.read_text(encoding="utf-8"))
+
+    def publish_file_on_branch(self, branch: str, relative_path: str, content: bytes, message: str):
+        """Publish test bytes on a branch, then refresh remote-tracking refs."""
+        self.git("checkout", branch)
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        self.git("add", "--", relative_path)
+        self.git("commit", "-m", message)
+        self.git("push", "origin", branch)
+        self.git("fetch", "origin")
+
     def tearDown(self):
         self.temp_dir.cleanup()
 
@@ -201,7 +214,7 @@ class RemoteEventTests(unittest.TestCase):
 
     def run_remote_events(self, *args):
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             code = groupctl.main(["remote-events", "--root", str(self.root), *args])
         return code, output.getvalue()
 
@@ -220,3 +233,63 @@ class RemoteEventTests(unittest.TestCase):
         self.assertEqual(code, 0, second)
         self.assertIn("No new remote events since the last local checkpoint.", second)
         self.assertNotIn("finding", second)
+
+    def test_malformed_remote_event_is_reported_and_not_checkpointed(self):
+        self.publish_file_on_branch(
+            "people/P17/demo", ".group/events/E-malformed.json", b"{ this is not JSON }\n",
+            "add malformed event fixture",
+        )
+
+        code, output = self.run_remote_events("--remote", "origin", "--new-only", "--mark-seen")
+
+        self.assertEqual(code, 1)
+        self.assertIn("invalid JSON", output)
+        self.assertIn("Checkpoint not updated", output)
+        self.assertFalse((self.root / ".group/local/known_remote_events_origin.json").exists())
+
+    def test_remote_event_with_mismatched_group_id_is_rejected(self):
+        _, event = self.current_event()
+        event["event_id"] = "E-20261021T000000Z-P17-bad1"
+        event["group_id"] = "G-OTHER"
+        relative_path = f".group/events/{event['event_id']}.json"
+        content = (json.dumps(event, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        self.publish_file_on_branch(
+            "people/P17/demo", relative_path, content, "add mismatched group event fixture",
+        )
+
+        code, output = self.run_remote_events("--remote", "origin", "--new-only")
+
+        self.assertEqual(code, 1)
+        self.assertIn("group_id 'G-OTHER' does not match local group 'G-12'", output)
+        self.assertIn("INVALID", output)
+
+    def test_same_event_id_with_different_raw_line_endings_is_immutability_conflict(self):
+        event_path, _event = self.current_event()
+        # Save the exact bytes that were committed on people/P17/demo.
+        original_bytes = event_path.read_bytes()
+        self.assertIn(b"\n", original_bytes)
+        self.assertNotIn(b"\r\n", original_bytes)
+
+        # Create another remote branch from main, which has no finding event, then
+        # publish the same JSON/event ID with CRLF bytes. JSON data is equivalent,
+        # but a published event is immutable at the byte level.
+        self.git("checkout", "-b", "people/P22/line-ending-conflict", "main")
+        duplicate_path = self.root / ".group/events" / event_path.name
+        duplicate_path.parent.mkdir(parents=True, exist_ok=True)
+        duplicate_path.write_bytes(original_bytes.replace(b"\n", b"\r\n"))
+        relative_path = duplicate_path.relative_to(self.root).as_posix()
+        self.git("add", "--", relative_path)
+        self.git("commit", "-m", "add byte-different duplicate event fixture")
+        self.git("push", "--set-upstream", "origin", "people/P22/line-ending-conflict")
+        self.git("fetch", "origin")
+
+        code, output = self.run_remote_events("--remote", "origin", "--new-only")
+
+        self.assertEqual(code, 1)
+        self.assertIn("IMMUTABILITY CONFLICT", output)
+        self.assertIn(event_path.stem, output)
+
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

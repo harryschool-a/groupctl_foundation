@@ -9,7 +9,9 @@ This project is a collaboration helper for several human–AI pairs working in o
 - `events`: list and validate event files in the current checkout.
 - `event-create`: create a local event from a JSON payload file, adding the common envelope from `.group/group.json` and `.group/members/`.
 - `remote-events`: after a Git fetch, inspect event files on fetched remote-tracking branches without checking out those branches or modifying the working tree. Detect malformed events and event-ID content conflicts. An optional local-only checkpoint helps SYNC distinguish events already inspected from newly discovered ones.
-- Unit tests for configuration, event validation/creation, immutable event writes, and remote event discovery using a local Git remote.
+- Unit tests for configuration, event validation/creation, immutable event writes, and remote event discovery using a local Git remote (19 tests).
+- Remote event immutability checks hash the exact Git blob bytes, so different LF/CRLF byte content under the same event ID is detected even on Windows.
+- Remote discovery integration tests cover malformed JSON, mismatched group IDs, and event-ID content conflicts; the test module can be run directly as well as through unittest discovery.
 
 These are low-level implementation helpers. `SYNC`, `PUB`, `INT`, `REV`, `TEST`, `STATUS`, and `FINAL` are human-to-agent prompt commands whose procedures are defined in [`AGENT_INSTRUCTIONS.md`](AGENT_INSTRUCTIONS.md). Do not present them as required shell subcommands.
 

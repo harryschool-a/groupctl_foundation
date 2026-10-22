@@ -449,6 +449,17 @@ def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_git_blob(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    """Run a Git command returning bytes, preserving exact blob contents."""
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def _remote_checkpoint_path(root: Path, remote: str) -> Path:
     """Return a safe local-only checkpoint path for one named Git remote."""
     if not remote or remote.startswith("-") or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in remote):
@@ -491,13 +502,20 @@ def collect_remote_events(root: Path, remote: str = "origin") -> tuple[dict[str,
                        if name.strip().endswith(".json")
                        and Path(name.strip()).parent.as_posix() == EVENTS_DIR.as_posix()]
         for event_path in event_paths:
-            shown = _run_git(root, "show", f"{ref}:{event_path}")
+            shown = _run_git_blob(root, "cat-file", "blob", f"{ref}:{event_path}")
             if shown.returncode != 0:
-                errors.append(f"Could not read {ref}:{event_path}: {shown.stderr.strip()}")
+                message = shown.stderr.decode("utf-8", errors="replace").strip()
+                errors.append(f"Could not read {ref}:{event_path}: {message}")
                 continue
-            raw = shown.stdout
+            raw_bytes = shown.stdout
             try:
-                data = json.loads(raw)
+                raw_text = raw_bytes.decode("utf-8")
+                data = json.loads(raw_text)
+            except UnicodeDecodeError as exc:
+                errors.append(
+                    f"INVALID {ref}:{event_path}: event is not valid UTF-8 (byte offset {exc.start})"
+                )
+                continue
             except json.JSONDecodeError as exc:
                 errors.append(f"INVALID {ref}:{event_path}: invalid JSON ({exc.msg}, line {exc.lineno})")
                 continue
@@ -511,7 +529,9 @@ def collect_remote_events(root: Path, remote: str = "origin") -> tuple[dict[str,
                 continue
 
             event_id = data["event_id"]
-            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            # Hash the Git blob bytes exactly. Text mode can normalize CRLF/LF on
+            # Windows, which would hide a change to an immutable published event.
+            digest = hashlib.sha256(raw_bytes).hexdigest()
             if event_id not in events:
                 events[event_id] = {
                     "data": data,
