@@ -5,10 +5,12 @@ Implemented milestones:
 - repository initialization;
 - group and event validation;
 - local creation and listing of immutable-format collaboration event files;
-- read-only discovery of events on already-fetched remote branches with a local-only checkpoint.
+- read-only discovery of events on already-fetched remote branches with a local-only checkpoint;
+- final candidate and confirmed finalization bookkeeping.
 
-Git publication and the human-to-agent workflows (SYNC/PUB/INT/REV/TEST/STATUS/FINAL)
-are guided by AGENT_INSTRUCTIONS.md and use these low-level helpers plus Git.
+The seven human-to-agent prompt commands are defined in AGENT_INSTRUCTIONS.md. Git
+handles branch/commit/merge mechanics, this CLI handles deterministic validation and
+records, and the local AI agent supplies semantic judgment.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ COMMON_EVENT_FIELDS = {
 REVIEW_VERDICTS = {"accept", "accept_with_changes", "reject", "needs_more_evidence"}
 TEST_RESULTS = {"pass", "fail", "partial", "not_available"}
 INTEGRATION_RESULTS = {"success", "failed", "needs_human"}
+FINAL_STATUSES = {"completed", "completed_with_known_limitations"}
 
 
 def read_json(path: Path) -> Any:
@@ -151,7 +154,7 @@ def validate_event_payload(data: dict[str, Any]) -> list[str]:
 
     elif event_type == "review":
         errors.extend(_validate_required_string_fields(data, ("change_id", "verdict", "summary")))
-        if "verdict" in data and data["verdict"] not in REVIEW_VERDICTS:
+        if "verdict" in data and (not isinstance(data["verdict"], str) or data["verdict"] not in REVIEW_VERDICTS):
             errors.append("verdict must be one of: " + ", ".join(sorted(REVIEW_VERDICTS)) + ".")
         errors.extend(_validate_string_list_field(data, "issues"))
         errors.extend(_validate_string_list_field(data, "tests_run"))
@@ -160,7 +163,7 @@ def validate_event_payload(data: dict[str, Any]) -> list[str]:
         errors.extend(_validate_required_string_fields(data, ("scope", "commit", "automated_result", "summary")))
         errors.extend(_validate_string_list_field(data, "commands"))
         errors.extend(_validate_string_list_field(data, "human_checks_required"))
-        if "automated_result" in data and data["automated_result"] not in TEST_RESULTS:
+        if "automated_result" in data and (not isinstance(data["automated_result"], str) or data["automated_result"] not in TEST_RESULTS):
             errors.append("automated_result must be one of: " + ", ".join(sorted(TEST_RESULTS)) + ".")
         for field in ("passed", "failed", "skipped"):
             if field not in data:
@@ -170,7 +173,7 @@ def validate_event_payload(data: dict[str, Any]) -> list[str]:
 
     elif event_type == "integration_result":
         errors.extend(_validate_required_string_fields(data, ("change_id", "target_branch", "result", "summary")))
-        if "result" in data and data["result"] not in INTEGRATION_RESULTS:
+        if "result" in data and (not isinstance(data["result"], str) or data["result"] not in INTEGRATION_RESULTS):
             errors.append("result must be one of: " + ", ".join(sorted(INTEGRATION_RESULTS)) + ".")
         errors.extend(_validate_string_list_field(data, "conflicts"))
         if "verification" not in data:
@@ -193,10 +196,29 @@ def validate_event_payload(data: dict[str, Any]) -> list[str]:
         if "blocking_change_id" in data and not _is_nonempty_string(data["blocking_change_id"]):
             errors.append("blocking_change_id must be a non-empty string when provided.")
 
-    elif event_type in {"final_candidate", "final_result"}:
-        # Avoid imposing undocumented payload key names before FINAL is implemented.
-        if "canonical_commit" in data and not _is_nonempty_string(data["canonical_commit"]):
-            errors.append("canonical_commit must be a non-empty string when provided.")
+    elif event_type == "final_candidate":
+        # The contract describes the meaning of these fields; the helper uses the
+        # same names in both the candidate event and its local candidate report.
+        errors.extend(_validate_required_string_fields(
+            data, ("canonical_branch", "canonical_commit", "report_file", "summary")
+        ))
+        for field in ("test_evidence", "known_limitations", "unresolved_concerns"):
+            errors.extend(_validate_string_list_field(data, field))
+        for field in ("completed_work", "contributors"):
+            errors.extend(_validate_string_list_field(data, field, required=False))
+        if _is_nonempty_string(data.get("report_file")) and (Path(data["report_file"]).is_absolute() or ".." in Path(data["report_file"]).parts):
+            errors.append("report_file must be a repository-relative path without '..'.")
+
+    elif event_type == "final_result":
+        errors.extend(_validate_required_string_fields(
+            data, ("canonical_branch", "canonical_commit", "report_file", "initiated_by", "status", "summary")
+        ))
+        for field in ("test_evidence", "known_limitations"):
+            errors.extend(_validate_string_list_field(data, field))
+        if "status" in data and (not isinstance(data["status"], str) or data["status"] not in FINAL_STATUSES):
+            errors.append("status must be one of: " + ", ".join(sorted(FINAL_STATUSES)) + ".")
+        if _is_nonempty_string(data.get("report_file")) and (Path(data["report_file"]).is_absolute() or ".." in Path(data["report_file"]).parts):
+            errors.append("report_file must be a repository-relative path without '..'.")
 
     return errors
 
@@ -340,6 +362,114 @@ def initialize_repository(root: Path, group_id: str, person_id: str, display_nam
             if existing and existing[-1] != "":
                 f.write("\n")
             f.write("\n".join(missing) + "\n")
+
+
+def validate_member_descriptors(root: Path) -> list[str]:
+    """Validate committed member descriptors against the repository contract."""
+    errors: list[str] = []
+    members_dir = root / MEMBERS_DIR
+    if not members_dir.is_dir():
+        return [f"Members directory does not exist: {members_dir}"]
+    paths = sorted(members_dir.glob("*.json"))
+    if not paths:
+        errors.append("At least one member descriptor is required under .group/members/.")
+    for path in paths:
+        try:
+            member = read_json(path)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if not isinstance(member, dict):
+            errors.append(f"{path.relative_to(root)} must contain a JSON object.")
+            continue
+        for field in ("protocol_version", "person_id", "display_name", "joined_at"):
+            if field not in member:
+                errors.append(f"{path.relative_to(root)} is missing required field: {field}")
+        if member.get("protocol_version") != PROTOCOL_VERSION:
+            errors.append(f"{path.relative_to(root)} protocol_version must be {PROTOCOL_VERSION!r}.")
+        for field in ("person_id", "display_name", "joined_at"):
+            if field in member and not _is_nonempty_string(member[field]):
+                errors.append(f"{path.relative_to(root)} field {field} must be a non-empty string.")
+        person_id = member.get("person_id")
+        if _is_nonempty_string(person_id):
+            if "/" in person_id or "\\" in person_id or person_id in {".", ".."}:
+                errors.append(f"{path.relative_to(root)} person_id must be a single path-safe identifier.")
+            if path.name != f"{person_id}.json":
+                errors.append(f"Member filename must match person_id: {path.name} (expected {person_id}.json).")
+        joined_at = member.get("joined_at")
+        if _is_nonempty_string(joined_at):
+            timestamp = joined_at[:-1] + "+00:00" if joined_at.endswith("Z") else joined_at
+            try:
+                parsed = datetime.fromisoformat(timestamp)
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    errors.append(f"{path.relative_to(root)} joined_at must include a timezone.")
+            except ValueError:
+                errors.append(f"{path.relative_to(root)} joined_at must be an ISO 8601 timestamp with timezone.")
+    return errors
+
+
+def validate_final_records(root: Path, config: dict[str, Any]) -> list[str]:
+    """Validate finalization files if finalization has begun or completed."""
+    errors: list[str] = []
+    final_dir = root / GROUP_DIR / "final"
+    report_path = final_dir / "final_report.md"
+    envelope_path = final_dir / "final.json"
+    if report_path.exists() != envelope_path.exists():
+        errors.append(".group/final/final_report.md and .group/final/final.json must either both exist or both be absent.")
+    if envelope_path.is_file():
+        try:
+            data = read_json(envelope_path)
+        except ValueError as exc:
+            return errors + [str(exc)]
+        if not isinstance(data, dict):
+            return errors + [".group/final/final.json must contain a JSON object."]
+        required = ("protocol_version", "group_id", "canonical_branch", "canonical_commit", "report_file", "initiated_by", "created_at", "status", "known_limitations")
+        for field in required:
+            if field not in data:
+                errors.append(f".group/final/final.json is missing required field: {field}")
+        if data.get("protocol_version") != PROTOCOL_VERSION:
+            errors.append(f".group/final/final.json protocol_version must be {PROTOCOL_VERSION!r}.")
+        if data.get("group_id") != config.get("group_id"):
+            errors.append(".group/final/final.json group_id does not match .group/group.json.")
+        if data.get("canonical_branch") != config.get("canonical_branch"):
+            errors.append(".group/final/final.json canonical_branch does not match .group/group.json.")
+        if not _is_nonempty_string(data.get("canonical_commit")):
+            errors.append(".group/final/final.json canonical_commit must be a non-empty string.")
+        if data.get("report_file") != ".group/final/final_report.md":
+            errors.append(".group/final/final.json report_file must be '.group/final/final_report.md'.")
+        if not isinstance(data.get("status"), str) or data.get("status") not in FINAL_STATUSES:
+            errors.append(".group/final/final.json status must be one of: " + ", ".join(sorted(FINAL_STATUSES)) + ".")
+        if not isinstance(data.get("known_limitations"), list) or any(not isinstance(x, str) for x in data.get("known_limitations", [])):
+            errors.append(".group/final/final.json known_limitations must be an array of strings.")
+        if data.get("status") == "completed" and data.get("known_limitations"):
+            errors.append("Use completed_with_known_limitations when known_limitations is non-empty.")
+        if not report_path.is_file():
+            errors.append(".group/final/final_report.md is missing.")
+        else:
+            report_text = report_path.read_text(encoding="utf-8")
+            if _is_nonempty_string(data.get("canonical_commit")) and data["canonical_commit"] not in report_text:
+                errors.append("final_report.md does not mention the canonical_commit recorded in final.json.")
+        events_dir = root / EVENTS_DIR
+        matching_final_events: list[dict[str, Any]] = []
+        if events_dir.is_dir():
+            for event_path in events_dir.glob("*.json"):
+                try:
+                    event = read_json(event_path)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or event.get("event_type") != "final_result":
+                    continue
+                if event.get("canonical_commit") != data.get("canonical_commit"):
+                    continue
+                if event.get("report_file") != data.get("report_file"):
+                    continue
+                if event.get("status") != data.get("status"):
+                    continue
+                if not validate_event(event, event_path):
+                    matching_final_events.append(event)
+        if not matching_final_events:
+            errors.append("No valid final_result event matches final.json canonical_commit, report_file, and status.")
+    return errors
 
 
 def _load_valid_group(root: Path) -> dict[str, Any]:
@@ -675,6 +805,11 @@ def command_validate(args: argparse.Namespace) -> int:
                 event_data = read_json(event_path)
                 for error in validate_event(event_data, event_path):
                     event_errors.append(f"{event_path.relative_to(root)}: {error}")
+                if isinstance(event_data, dict) and isinstance(config, dict) and event_data.get("group_id") != config.get("group_id"):
+                    event_errors.append(
+                        f"{event_path.relative_to(root)}: group_id {event_data.get('group_id')!r} "
+                        f"does not match local group {config.get('group_id')!r}."
+                    )
             except ValueError as exc:
                 event_errors.append(str(exc))
 
@@ -685,7 +820,25 @@ def command_validate(args: argparse.Namespace) -> int:
     else:
         print(f"Events: OK ({event_count} file(s) checked)")
 
-    return 1 if errors or event_errors else 0
+    member_errors = validate_member_descriptors(root)
+    if member_errors:
+        print("Members: INVALID")
+        for error in member_errors:
+            print(f"  - {error}")
+    else:
+        print("Members: OK")
+
+    final_errors = validate_final_records(root, config if isinstance(config, dict) else {})
+    if final_errors:
+        print("Final records: INVALID")
+        for error in final_errors:
+            print(f"  - {error}")
+    elif (root / GROUP_DIR / "final" / "final.json").exists():
+        print("Final records: OK")
+    else:
+        print("Final records: not finalized")
+
+    return 1 if errors or event_errors or member_errors or final_errors else 0
 
 
 def command_list_events(args: argparse.Namespace) -> int:
@@ -695,23 +848,34 @@ def command_list_events(args: argparse.Namespace) -> int:
         print(f"ERROR: Events directory does not exist: {events_dir}", file=sys.stderr)
         return 1
 
+    try:
+        config = _load_valid_group(root)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     files = sorted(events_dir.glob("*.json"))
     if not files:
         print("No collaboration events found.")
         return 0
 
+    invalid_count = 0
     for path in files:
         try:
             data = read_json(path)
         except ValueError as exc:
             print(f"INVALID  {path.name}: {exc}")
+            invalid_count += 1
             continue
         errors = validate_event(data, path)
+        if isinstance(data, dict) and data.get("group_id") != config.get("group_id"):
+            errors.append(f"group_id {data.get('group_id')!r} does not match local group {config.get('group_id')!r}.")
         if errors:
             print(f"INVALID  {path.name}: {'; '.join(errors)}")
+            invalid_count += 1
         else:
             print(f"OK       {data['event_type']:<20} {data['event_id']} (person {data['person_id']})")
-    return 0
+    return 1 if invalid_count else 0
 
 
 def command_event_create(args: argparse.Namespace) -> int:
@@ -735,6 +899,330 @@ def command_event_create(args: argparse.Namespace) -> int:
     print(f"Created local event: {event_path.relative_to(root)}")
     print(f"Event type: {args.event_type}")
     print("This event is local only until it is committed and pushed with Git.")
+    return 0
+
+
+def _git_output(root: Path, *arguments: str) -> str:
+    result = _run_git(root, *arguments)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(arguments)} failed."
+        raise ValueError(detail)
+    return result.stdout.strip()
+
+
+def _require_canonical_checkout(root: Path, config: dict[str, Any]) -> tuple[str, str]:
+    """Return current branch/HEAD, requiring the configured canonical checkout."""
+    branch = _git_output(root, "branch", "--show-current")
+    if branch != config["canonical_branch"]:
+        raise ValueError(
+            f"This operation must run from the configured canonical branch "
+            f"{config['canonical_branch']!r}; current branch is {branch!r}."
+        )
+    head = _git_output(root, "rev-parse", "HEAD")
+    branch_head = _git_output(root, "rev-parse", f"refs/heads/{config['canonical_branch']}")
+    if head != branch_head:
+        raise ValueError("HEAD is not the tip of the configured canonical branch.")
+    return branch, head
+
+
+def _read_payload_file(root: Path, payload_arg: str) -> dict[str, Any]:
+    path = Path(payload_arg)
+    if not path.is_absolute():
+        path = root / path
+    payload = read_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Payload file must contain a JSON object: {path}")
+    return payload
+
+
+def _require_string_list(payload: dict[str, Any], name: str) -> list[str]:
+    value = payload.get(name)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a JSON array of strings.")
+    return value
+
+
+def _markdown_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items) if items else "- None recorded"
+
+
+def _candidate_markdown(group_id: str, payload: dict[str, Any]) -> str:
+    completed_work = _require_string_list(payload, "completed_work")
+    contributors = _require_string_list(payload, "contributors")
+    test_evidence = _require_string_list(payload, "test_evidence")
+    known_limitations = _require_string_list(payload, "known_limitations")
+    unresolved_concerns = _require_string_list(payload, "unresolved_concerns")
+    return (
+        "# Group Final Candidate\n\n"
+        f"## Assignment\nGroup `{group_id}`\n\n"
+        f"## Result\n{payload['summary']}\n\n"
+        f"## Canonical Commit\nBranch: `{payload['canonical_branch']}`\n"
+        f"Commit: `{payload['canonical_commit']}`\n\n"
+        f"## Important Changes\n{_markdown_bullets(completed_work)}\n\n"
+        f"## Contributors\n{_markdown_bullets(contributors)}\n\n"
+        f"## Validation\n{_markdown_bullets(test_evidence)}\n\n"
+        f"## Known Limitations\n{_markdown_bullets(known_limitations)}\n\n"
+        f"## Unresolved Concerns\n{_markdown_bullets(unresolved_concerns)}\n\n"
+        "---\nReview this candidate. Final records must not be published until a human has confirmed it.\n"
+    )
+
+
+def command_candidate_create(args: argparse.Namespace) -> int:
+    """Create/update a reviewable final candidate plus immutable final_candidate event."""
+    root = Path(args.root).resolve()
+    candidate_path = root / GROUP_DIR / "final" / "candidate.md"
+    final_json = root / GROUP_DIR / "final" / "final.json"
+    final_report = root / GROUP_DIR / "final" / "final_report.md"
+    existed_before = candidate_path.exists()
+    event_path: Path | None = None
+    try:
+        config = _load_valid_group(root)
+        if command_validate(argparse.Namespace(root=str(root))) != 0:
+            raise ValueError("Repository validation failed; refusing candidate creation.")
+        payload = _read_payload_file(root, args.payload_file)
+        branch, head = _require_canonical_checkout(root, config)
+        canonical_branch = payload.get("canonical_branch", branch)
+        canonical_commit = payload.get("canonical_commit", head)
+        if canonical_branch != config["canonical_branch"]:
+            raise ValueError("canonical_branch in candidate payload must match .group/group.json.")
+        if canonical_commit != head:
+            raise ValueError(
+                "canonical_commit must equal the current canonical branch tip when the candidate is prepared. "
+                f"Current tip is {head}."
+            )
+        if final_json.exists() or final_report.exists():
+            raise ValueError("A final result already exists; refusing to replace finalization records.")
+        if existed_before and not args.replace_candidate:
+            raise ValueError(
+                f"{candidate_path.relative_to(root)} already exists. Inspect it and use --replace-candidate only to deliberately revise the candidate."
+            )
+        for field in ("summary",):
+            if not _is_nonempty_string(payload.get(field)):
+                raise ValueError(f"{field} must be a non-empty string.")
+        completed_work = _require_string_list(payload, "completed_work")
+        contributors = _require_string_list(payload, "contributors")
+        test_evidence = _require_string_list(payload, "test_evidence")
+        known_limitations = _require_string_list(payload, "known_limitations")
+        unresolved_concerns = _require_string_list(payload, "unresolved_concerns")
+        person_id = _resolve_person_id(root, args.person_id)
+        event_payload = {
+            "canonical_branch": branch,
+            "canonical_commit": head,
+            "report_file": ".group/final/candidate.md",
+            "summary": payload["summary"],
+            "completed_work": completed_work,
+            "contributors": contributors,
+            "test_evidence": test_evidence,
+            "known_limitations": known_limitations,
+            "unresolved_concerns": unresolved_concerns,
+        }
+        # Validate the event before creating either artifact.
+        probe = {
+            "protocol_version": PROTOCOL_VERSION,
+            "event_id": "E-20990101T000000Z-PROBE-0000",
+            "event_type": "final_candidate",
+            "group_id": config["group_id"],
+            "person_id": person_id,
+            "created_at": "2099-01-01T00:00:00Z",
+            "related_events": args.related_event,
+            **event_payload,
+        }
+        errors = validate_event(probe, Path(probe["event_id"] + ".json"))
+        if errors:
+            raise ValueError("Candidate payload is invalid: " + "; ".join(errors))
+
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown = _candidate_markdown(config["group_id"], {**payload, "canonical_branch": branch, "canonical_commit": head})
+        if args.replace_candidate:
+            candidate_path.write_text(markdown, encoding="utf-8", newline="\n")
+        else:
+            with candidate_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(markdown)
+        try:
+            event_path = create_event(root, "final_candidate", event_payload, person_id, args.related_event)
+        except Exception:
+            if existed_before and args.replace_candidate and old_candidate_text is not None:
+                candidate_path.write_text(old_candidate_text, encoding="utf-8", newline="\n")
+            elif not existed_before:
+                candidate_path.unlink(missing_ok=True)
+            raise
+    except (ValueError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Candidate report created: {candidate_path.relative_to(root)}")
+    print(f"Candidate event created: {event_path.relative_to(root)}")
+    print(f"Canonical branch: {branch}")
+    print(f"Canonical commit: {head}")
+    print("Show candidate.md to the human and obtain confirmation before finalizing.")
+    return 0
+
+
+def _final_report_markdown(group_id: str, payload: dict[str, Any]) -> str:
+    return (
+        "# Group Final Report\n\n"
+        "## Assignment\n"
+        f"Group `{group_id}`\n\n"
+        "## Result\n"
+        f"{payload['summary']}\n\n"
+        "## Canonical Commit\n"
+        f"Branch: `{payload['canonical_branch']}`\n"
+        f"Commit: `{payload['canonical_commit']}`\n\n"
+        "## Important Changes\n"
+        f"{_markdown_bullets(_require_string_list(payload, 'completed_work'))}\n\n"
+        "## Validation\n"
+        f"{_markdown_bullets(_require_string_list(payload, 'test_evidence'))}\n\n"
+        "## Known Limitations\n"
+        f"{_markdown_bullets(_require_string_list(payload, 'known_limitations'))}\n\n"
+        "## Contributors\n"
+        f"{_markdown_bullets(_require_string_list(payload, 'contributors'))}\n"
+    )
+
+
+def command_finalize_confirmed(args: argparse.Namespace) -> int:
+    """Write final report/envelope/event only after explicit human confirmation."""
+    root = Path(args.root).resolve()
+    report_path = root / GROUP_DIR / "final" / "final_report.md"
+    envelope_path = root / GROUP_DIR / "final" / "final.json"
+    created_paths: list[Path] = []
+    event_path: Path | None = None
+    try:
+        if not args.human_confirmed:
+            raise ValueError("Human confirmation is required. Review candidate.md first, then pass --human-confirmed.")
+        config = _load_valid_group(root)
+        # Refuse finalization if current configuration/events/members are invalid.
+        validation_rc = command_validate(argparse.Namespace(root=str(root)))
+        if validation_rc != 0:
+            raise ValueError("Repository validation failed; refusing finalization.")
+        payload = _read_payload_file(root, args.payload_file)
+        branch, head = _require_canonical_checkout(root, config)
+        canonical_branch = payload.get("canonical_branch", branch)
+        if canonical_branch != config["canonical_branch"]:
+            raise ValueError("canonical_branch in final payload must match .group/group.json.")
+        requested_commit = payload.get("canonical_commit")
+        if not _is_nonempty_string(requested_commit):
+            raise ValueError("canonical_commit must be the exact commit proposed in candidate.md.")
+        resolved_commit = _git_output(root, "rev-parse", "--verify", f"{requested_commit}^{{commit}}")
+        if resolved_commit != requested_commit:
+            raise ValueError("canonical_commit must use the full commit hash, not an abbreviation.")
+        ancestor_check = _run_git(root, "merge-base", "--is-ancestor", resolved_commit, head)
+        if ancestor_check.returncode != 0:
+            raise ValueError("canonical_commit is not an ancestor of the current canonical branch tip.")
+        # Permit only metadata/event commits after the candidate code commit. A later
+        # source/test change would mean the candidate no longer describes the branch.
+        changed_paths_text = _git_output(root, "diff", "--name-only", f"{resolved_commit}..{head}")
+        changed_paths = [line for line in changed_paths_text.splitlines() if line]
+        non_metadata = [name for name in changed_paths if not name.startswith(".group/")]
+        if non_metadata:
+            raise ValueError(
+                "Non-.group files changed after the candidate canonical commit: "
+                + ", ".join(non_metadata)
+                + ". Regenerate the candidate for the current canonical code before finalizing."
+            )
+        candidate_path = root / GROUP_DIR / "final" / "candidate.md"
+        if not candidate_path.is_file():
+            raise ValueError("Missing .group/final/candidate.md; prepare and show a candidate first.")
+        candidate_text = candidate_path.read_text(encoding="utf-8")
+        if resolved_commit not in candidate_text:
+            raise ValueError("candidate.md does not identify the requested canonical_commit.")
+        if report_path.exists() or envelope_path.exists():
+            raise ValueError("Final report/envelope already exists; refusing to overwrite finalization records.")
+        for field in ("summary", "status"):
+            if not _is_nonempty_string(payload.get(field)):
+                raise ValueError(f"{field} must be a non-empty string.")
+        if payload["status"] not in FINAL_STATUSES:
+            raise ValueError("status must be completed or completed_with_known_limitations.")
+        completed_work = _require_string_list(payload, "completed_work")
+        contributors = _require_string_list(payload, "contributors")
+        test_evidence = _require_string_list(payload, "test_evidence")
+        known_limitations = _require_string_list(payload, "known_limitations")
+        if payload["status"] == "completed" and known_limitations:
+            raise ValueError("Use status completed_with_known_limitations when known_limitations is non-empty.")
+        # Most recent candidate event must describe the same commit and have no unresolved concerns.
+        candidate_events: list[dict[str, Any]] = []
+        for path in (root / EVENTS_DIR).glob("*.json"):
+            try:
+                event = read_json(path)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event_type") == "final_candidate" and event.get("canonical_commit") == resolved_commit:
+                if not validate_event(event, path):
+                    candidate_events.append(event)
+        if not candidate_events:
+            raise ValueError("No valid final_candidate event exists for this canonical commit.")
+        latest_candidate = max(candidate_events, key=lambda item: item.get("created_at", ""))
+        if latest_candidate.get("unresolved_concerns"):
+            raise ValueError("The latest candidate still has unresolved concerns. Revise the candidate and obtain human approval again.")
+        if latest_candidate.get("known_limitations", []) != known_limitations:
+            raise ValueError("known_limitations in final payload must match the approved candidate event.")
+        person_id = _resolve_person_id(root, args.person_id)
+        final_payload = {
+            "canonical_branch": branch,
+            "canonical_commit": resolved_commit,
+            "report_file": ".group/final/final_report.md",
+            "test_evidence": test_evidence,
+            "known_limitations": known_limitations,
+            "initiated_by": person_id,
+            "status": payload["status"],
+            "summary": payload["summary"],
+        }
+        probe = {
+            "protocol_version": PROTOCOL_VERSION,
+            "event_id": "E-20990101T000000Z-PROBE-0000",
+            "event_type": "final_result",
+            "group_id": config["group_id"],
+            "person_id": person_id,
+            "created_at": "2099-01-01T00:00:00Z",
+            "related_events": args.related_event,
+            **final_payload,
+        }
+        errors = validate_event(probe, Path(probe["event_id"] + ".json"))
+        if errors:
+            raise ValueError("Final result payload is invalid: " + "; ".join(errors))
+
+        final_dir = report_path.parent
+        final_dir.mkdir(parents=True, exist_ok=True)
+        with report_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(_final_report_markdown(config["group_id"], {
+                **payload,
+                "canonical_branch": branch,
+                "canonical_commit": resolved_commit,
+            }))
+        created_paths.append(report_path)
+        envelope = {
+            "protocol_version": PROTOCOL_VERSION,
+            "group_id": config["group_id"],
+            "canonical_branch": branch,
+            "canonical_commit": resolved_commit,
+            "report_file": ".group/final/final_report.md",
+            "initiated_by": person_id,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": payload["status"],
+            "known_limitations": known_limitations,
+        }
+        write_json(envelope_path, envelope)
+        created_paths.append(envelope_path)
+        event_path = create_event(root, "final_result", final_payload, person_id, args.related_event)
+        post_errors = validate_final_records(root, config)
+        if post_errors:
+            raise ValueError("Generated final records failed validation: " + "; ".join(post_errors))
+    except (ValueError, OSError) as exc:
+        # Final records are uncommitted until the caller publishes them. Roll back
+        # only files this invocation created so it can be safely retried.
+        for path in created_paths:
+            path.unlink(missing_ok=True)
+        if event_path is not None:
+            event_path.unlink(missing_ok=True)
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Final report created: {report_path.relative_to(root)}")
+    print(f"Final JSON created: {envelope_path.relative_to(root)}")
+    print(f"Final event created: {event_path.relative_to(root)}")
+    print(f"Status: {payload['status']}")
+    print(f"Canonical branch: {branch}")
+    print(f"Canonical commit: {resolved_commit}")
+    print("Commit and push the finalization records using the configured group workflow.")
     return 0
 
 
@@ -786,6 +1274,28 @@ def build_parser() -> argparse.ArgumentParser:
     remote_events_parser.add_argument("--mark-seen", action="store_true",
                                       help="update the local-only checkpoint after the caller has inspected events")
     remote_events_parser.set_defaults(func=command_remote_events)
+
+    candidate_parser = subparsers.add_parser(
+        "final-candidate",
+        help="prepare .group/final/candidate.md and a final_candidate event from a JSON payload",
+    )
+    candidate_parser.add_argument("--root", default=".", help="repository root (default: current directory)")
+    candidate_parser.add_argument("--payload-file", required=True, help="JSON payload for the candidate report")
+    candidate_parser.add_argument("--person-id", help="initiating member ID (inferred if only one member exists)")
+    candidate_parser.add_argument("--related-event", action="append", default=[], help="related event ID; may be repeated")
+    candidate_parser.add_argument("--replace-candidate", action="store_true", help="deliberately replace an existing unfinalized candidate.md")
+    candidate_parser.set_defaults(func=command_candidate_create)
+
+    finalize_parser = subparsers.add_parser(
+        "finalize-confirmed",
+        help="write final report, final.json, and final_result event after human approval",
+    )
+    finalize_parser.add_argument("--root", default=".", help="repository root (default: current directory)")
+    finalize_parser.add_argument("--payload-file", required=True, help="JSON payload for final result")
+    finalize_parser.add_argument("--person-id", help="initiating member ID (inferred if only one member exists)")
+    finalize_parser.add_argument("--related-event", action="append", default=[], help="related event ID; may be repeated")
+    finalize_parser.add_argument("--human-confirmed", action="store_true", help="assert that the human reviewed candidate.md and confirmed finalization")
+    finalize_parser.set_defaults(func=command_finalize_confirmed)
 
     return parser
 
