@@ -1,0 +1,25 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261023T085728Z-P17-7e39",
+  "event_type": "final_result",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-23T08:57:28Z",
+  "related_events": [
+    "E-20261023T074432Z-P17-6420"
+  ],
+  "canonical_branch": "main",
+  "canonical_commit": "6870c9379090bd4794536a8eb905c9e2e33d45f0",
+  "report_file": ".group/final/final_report.md",
+  "test_evidence": [
+    "Canonical commit 6870c9379090bd4794536a8eb905c9e2e33d45f0: python -m unittest discover -s tests -v - 27 tests passed.",
+    "python groupctl.py validate: group configuration, event records, and members validated before candidate preparation.",
+    "python scripts/run_three_member_demo.py: DEMO SUCCESS using a temporary local Git remote. Live GitHub collaboration and independently operated AI agents remain untested."
+  ],
+  "known_limitations": [
+    "The three-member demonstration uses simulated members and a temporary local Git remote. Collaboration among independently operated AI agents and actual GitHub permission handling still needs to be demonstrated."
+  ],
+  "initiated_by": "P17",
+  "status": "completed_with_known_limitations",
+  "summary": "Implemented the Version 0.1 group collaboration layer for students and local AI coding agents using a shared Git repository."
+}

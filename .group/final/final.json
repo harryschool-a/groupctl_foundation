@@ -1,0 +1,13 @@
+{
+  "protocol_version": "0.1",
+  "group_id": "G-12",
+  "canonical_branch": "main",
+  "canonical_commit": "6870c9379090bd4794536a8eb905c9e2e33d45f0",
+  "report_file": ".group/final/final_report.md",
+  "initiated_by": "P17",
+  "created_at": "2026-10-23T08:57:28Z",
+  "status": "completed_with_known_limitations",
+  "known_limitations": [
+    "The three-member demonstration uses simulated members and a temporary local Git remote. Collaboration among independently operated AI agents and actual GitHub permission handling still needs to be demonstrated."
+  ]
+}
