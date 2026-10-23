@@ -1,56 +1,109 @@
-## 1. PUB (Publish)
-**Trigger:** User types exactly `PUB`
-**Procedure:**
-1. Stage all uncommitted event files using `git add .group/events/`.
-2. Commit the changes with a message like `chore(events): publish collaboration events`.
-3. Push the commit to the remote repository using `git push`.
+# Local AI Agent Collaboration Instructions — Version 0.1
 
-## 2. SYNC (Synchronize)
-**Trigger:** User types exactly `SYNC`
-**Procedure:**
-1. Pull the latest events from the remote repository using `git pull`.
-2. Run `python groupctl.py validate` to ensure the downloaded events are valid.
+These are **human-to-agent prompt commands**, not seven required shell subcommands. When the human types `SYNC`, `PUB`, `INT C-17`, `REV C-17`, `TEST`, `STATUS`, or `FINAL`, follow the procedure below. Use Git and `groupctl` for repeatable mechanics; use reasoning for semantic compatibility and conflict decisions. Ask the human when the intended behavior is materially uncertain.
 
-## 3. REV (Review)
-**Trigger:** User types `REV <change_id>`
-**Procedure:**
-1. Analyze the proposed change identified by `<change_id>`.
-2. Generate a valid JSON payload for a `review` event. It must include `change_id`, a `verdict` (must be one of: accept, accept_with_changes, reject, needs_more_evidence), and a `summary`.
-3. Save this payload to a temporary file (e.g., `local_review.json`).
-4. Run `python groupctl.py event-create --event-type review --payload-file local_review.json`.
-5. Execute the `PUB` workflow to automatically commit and push the new review event.
+The low-level `groupctl` CLI includes `init`, `validate`, `events`, `event-create`, `remote-events`, `final-candidate`, and `finalize-confirmed`. The last two are finalization helpers, **not replacements for the human prompt command `FINAL`**.
 
-## 4. INT (Integration)
-**Trigger:** User types `INT <change_id>`
-**Procedure:**
-1. Attempt to integrate the change identified by `<change_id>` into the target branch.
-2. Generate a valid JSON payload for an `integration_result` event. It must include `change_id`, `target_branch`, a `result` (must be one of: success, failed, needs_human), a `summary`, and a `verification` dictionary.
-3. Save this payload to a temporary file (e.g., `local_integration.json`).
-4. Run `python groupctl.py event-create --event-type integration_result --payload-file local_integration.json`.
-5. Execute the `PUB` workflow to automatically commit and push the new integration event.
+## Global rules
 
-## 5. TEST (Test)
-**Trigger:** User types `TEST` or `TEST <scope>`
-**Procedure:**
-1. Run the local test suite for the specified scope.
-2. Generate a valid JSON payload for a `test_result` event. It must include `scope`, `commit`, `automated_result` (must be: pass, fail, partial, or not_available), a `summary`, and integer counts for `passed`, `failed`, and `skipped`.
-3. Save this payload to a temporary file (e.g., `local_test.json`).
-4. Run `python groupctl.py event-create --event-type test_result --payload-file local_test.json`.
-5. Execute the `PUB` workflow to automatically commit and push the test event.
+1. Start in the repository root. Read `.group/group.json`; its `canonical_branch` is authoritative. Do not assume the canonical branch is `main` if configuration says otherwise.
+2. Use `.group/members/<person_id>.json` for member identity. Personal branches follow `people/<person_id>/<topic>`.
+3. Use `python groupctl.py validate` when relevant. Invalid records are not valid protocol evidence.
+4. A published event's summary is context, not proof. Verify referenced commits and inspect real diffs and tests.
+5. Event files under `.group/events/<event_id>.json` are immutable after publication. Correct a mistake with a new related event, not by editing the old event.
+6. Never force-push, discard uncommitted work, reset canonical state, overwrite tests merely to make them pass, or resolve a conflict by arbitrarily selecting one side.
+7. Keep private chat and experimental reasoning private. Publish only useful engineering information.
+8. `.group/local/` is for local-only state and must not be committed except `.group/local/.gitkeep`.
+9. Do not report a Git operation or test as successful unless its output/history confirms it.
+10. `SYNC` does not merge every feature branch; `PUB` does not merge into canonical state; a positive `REV` does not merge; successful Git merge does not prove semantic compatibility.
 
-## 6. STATUS (Status)
-**Trigger:** User types exactly `STATUS`
-**Procedure:**
-1. Run `git status` to check for uncommitted files.
-2. Run `python groupctl.py validate` to check the group configuration.
-3. Run `python groupctl.py events` to list all known collaboration events.
-4. Provide a summarized report of the repository health, pending changes, and collaboration events to the user.
+## `SYNC` — synchronize working context with the group
 
-## 7. FINAL (Finalization)
-**Trigger:** User types `FINAL <canonical_commit>` or exactly `FINAL`
-**Procedure:**
-1. Determine the intent: if `<canonical_commit>` is provided, the user is proposing a final version. If not, the user is submitting a final approval result.
-2. Generate a valid JSON payload for either a `final_candidate` or `final_result` event based on the intent. Both must include `canonical_commit` and a `summary`.
-3. Save this payload to a temporary file (e.g., `local_final.json`).
-4. Run `python groupctl.py event-create --event-type final_candidate` (or `final_result`) `--payload-file local_final.json`.
-5. Execute the `PUB` workflow to automatically commit and push the final event.
+1. Record current branch (`git branch --show-current`), commit (`git rev-parse HEAD`), and `git status --short`. Inspect staged, unstaged, and untracked files; preserve all unfinished work.
+2. Fetch refs and tags without changing the checkout: `git fetch --all --tags --prune`. If fetch fails, report the failure and do not claim synchronization succeeded.
+3. Discover events on fetched remote-tracking branches, not just the current checkout: `python groupctl.py remote-events --remote origin --new-only`. Replace `origin` if the repository uses a different remote. Read each new event and investigate its referenced code/commit.
+4. Compare the current branch with `origin/<canonical_branch>` as configured in `.group/group.json`. Check whether the canonical remote ref exists and inspect ahead/behind information.
+5. Incorporate canonical updates into the current work branch only when safe. Protect dirty work first. Prefer a non-destructive merge if no repository policy says otherwise. Do not blindly run `git pull`, discard changes, or merge unrelated feature branches automatically.
+6. Inspect relevant `change_published`, `review`, `integration_result`, `test_result`, `finding`, `question`, `answer`, and `blocker` events. Check important claims against real diffs and test output.
+7. If code changed, run relevant quick validation. Summarize current branch/commit, canonical commit, new events, what was incorporated, what remains separate, blockers, and any assumptions that need revision.
+8. Only after all events are inspected and summarized, checkpoint them with `python groupctl.py remote-events --remote origin --mark-seen`. A checkpoint means “inspected,” not “accepted” or “integrated.” Do not checkpoint if validation or immutability errors occurred.
+
+A clean `git pull` by itself is not a complete SYNC.
+
+## `PUB` — publish a coherent contribution
+
+1. Inspect branch, staged/unstaged diff, untracked files, and recent commits. If on the configured canonical branch, stop before publishing source changes and move to a personal branch with human agreement.
+2. Confirm branch ownership follows `people/<person_id>/<topic>`.
+3. Select a coherent contribution. Stage only relevant files. Check for secrets, credentials, generated files, conflict markers, unrelated edits, and accidental content. Run appropriate tests/build checks.
+4. Review `git diff --cached`, run `git diff --cached --check`, and commit source changes with a meaningful message. Do not force-push.
+5. Push the personal work branch. If rejected, fetch and reconcile safely or ask the human.
+6. Use the code commit's full SHA and a unique `change_id` not already used by a `change_published` event. The default convention is `C-<short-commit-sha>`.
+7. Create a payload with the documented fields: `change_id`, `branch`, `commit`, `summary`, `files_changed` (string array), `interface_changes` (string array), `tests_run` (string array), `known_issues` (string array), and `proposed_for_integration` (boolean). `groupctl` supplies the common envelope.
+8. Save the payload under `.group/local/`, then create the event, for example:
+
+   ```powershell
+   python groupctl.py event-create --event-type change_published --payload-file .group/local/change_published_payload.json --person-id P17
+   python groupctl.py validate
+   ```
+
+9. Stage only the new `.group/events/<event_id>.json`, commit the event separately, and push the personal branch again. The event's `commit` identifies the source-code commit, not the later event-only commit.
+10. Report the change ID, code commit, branch, event ID, tests, limitations, and whether both code and event were pushed. Never claim PUB succeeded unless those operations succeeded.
+
+## `REV <change_id>` — review without merging
+
+1. Fetch as needed and locate the exact `change_published` event across fetched remote branches.
+2. Verify its referenced branch and commit; inspect the actual diff and surrounding code, interface changes, assumptions, risks, tests, and compatibility with canonical work.
+3. Run relevant tests when practical. Separate definite defects, plausible risks, missing evidence, and subjective preferences.
+4. Select exactly one verdict: `accept`, `accept_with_changes`, `reject`, or `needs_more_evidence`.
+5. Create a `review` event with `change_id`, `verdict`, `summary`, `issues` (string array), and `tests_run` (string array). Validate, then commit/push the event. A positive review does not merge the change. A self-review is not independent approval.
+
+## `INT <change_id>` — integrate a specific published change
+
+1. Perform the discovery parts of SYNC and locate the matching `change_published` event. Confirm its branch and commit exist.
+2. Inspect the actual diff, interface changes, assumptions, surrounding code, and target branch. Default target is the current working branch unless the human or repository policy specifies otherwise; do not silently target canonical state.
+3. Preserve uncommitted work. Integrate according to repository policy. If conflicts occur, identify files, inspect both sides and their intent, and resolve only if the intended combined behavior is clear. Otherwise preserve the conflict state, stop, and publish a `blocker` requesting a human decision.
+4. Verify the commit is incorporated, check for leftover conflict markers, build if applicable, run relevant tests, and perform semantic compatibility review. A conflict-free merge alone is insufficient.
+5. Publish an `integration_result` containing `change_id`, `target_branch`, `result` (`success`, `failed`, or `needs_human`), `merge_commit` for successful integration, `conflicts` (string array), `conflict_resolution_summary` when relevant, `verification` (mapping check names to string results), and `summary`.
+6. Commit/push the event and explain the outcome. Integration into a personal branch does not mean the change is canonical.
+
+## `TEST [scope]` — produce test evidence
+
+1. Resolve scope: current branch by default, configured canonical branch when requested, or a named published change when a change ID is supplied. Record the exact commit before running tests.
+2. Discover available tests/build/lint/static-analysis/UI checks from project configuration and instructions. Run applicable checks; do not rewrite expected results just to make tests pass.
+3. Investigate failures enough to distinguish product failure, broken/stale test, missing environment, or inconclusive result. Give concrete instructions for human-required checks.
+4. Publish a `test_result` event with `scope`, `commit`, `commands` (string array), `automated_result` (`pass`, `fail`, `partial`, `not_available`), non-negative integer counts `passed`, `failed`, and `skipped`, `human_checks_required` (string array), and `summary`.
+5. Report what is proven, what failed, and what remains unknown. A result applies only to its exact commit.
+
+## `STATUS` — report current group position
+
+1. Inspect branch, commit, working tree, configured canonical branch/commit, and ahead/behind relationship. Fetch metadata first when useful and safe.
+2. Validate local events and inspect relevant remote events. Report dirty/uncommitted work, published but unintegrated changes, recent review/test evidence, blockers, and last tested commit when known.
+3. Recommend one concise next action. STATUS itself should not perform a large merge or rewrite code.
+
+## `FINAL` — finalize one group result
+
+1. Synchronize first. Enumerate published `change_published` events and check which referenced commits are incorporated in configured canonical state. Investigate every unincorporated change: intentionally rejected/obsolete, still important, or unknown.
+2. Review latest review, test, integration, and blocker events; run final automated checks on the proposed canonical code commit; identify concrete human checks and honest known limitations. If important work/failures remain unresolved, do not claim successful completion.
+3. Check out the configured canonical branch, ensure its working tree is clean, and identify the exact full commit SHA to propose. The `final-candidate` helper deliberately refuses to run on a personal branch or a stale branch tip.
+4. Create `.group/local/final_candidate_payload.json` with this shape (replace example values with inspected facts):
+
+   ```json
+   {
+     "canonical_branch": "main",
+     "canonical_commit": "FULL_40_CHARACTER_COMMIT_SHA",
+     "summary": "What the group produced.",
+     "completed_work": ["Implemented and integrated feature X."],
+     "contributors": ["P17 (Student A)", "P22 (Student B)"],
+     "test_evidence": ["python -m unittest discover -s tests -v: pass on the stated commit"],
+     "known_limitations": [],
+     "unresolved_concerns": []
+   }
+   ```
+
+5. Run `python groupctl.py final-candidate --payload-file .group/local/final_candidate_payload.json --person-id P17`. Inspect `.group/final/candidate.md` and the related `final_candidate` event. Commit and push only the candidate report and event to the canonical branch. If revising a candidate, use `--replace-candidate` deliberately; the new event remains immutable.
+6. Show `candidate.md` to the initiating human and obtain explicit confirmation. Do not infer confirmation from silence or from a test pass.
+7. After confirmation, create `.group/local/final_payload.json` with `canonical_branch`, the full `canonical_commit` named in the candidate, `summary`, `completed_work`, `contributors`, `test_evidence`, `known_limitations`, and `status`. Use `completed_with_known_limitations` when known limitations are non-empty.
+8. Run `python groupctl.py finalize-confirmed --payload-file .group/local/final_payload.json --person-id P17 --human-confirmed --related-event <FINAL_CANDIDATE_EVENT_ID>`. The explicit flag records that human confirmation happened; it is not a substitute for actually showing the candidate first. The helper verifies the canonical checkout, candidate event, absence of unresolved concerns, and that commits after the proposed canonical code commit change only `.group/` metadata.
+9. Validate, then commit/push `.group/final/final_report.md`, `.group/final/final.json`, and the `final_result` event. Report the exact canonical code commit and report path.
+
+`FINAL` is group finalization, not submission of the initiator's personal branch. The final code commit is intentionally distinct from later commits that publish finalization records.

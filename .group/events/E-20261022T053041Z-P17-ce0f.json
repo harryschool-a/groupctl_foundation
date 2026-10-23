@@ -1,0 +1,32 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261022T053041Z-P17-ce0f",
+  "event_type": "change_published",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-22T05:30:41Z",
+  "related_events": [],
+  "change_id": "C-47fa0fe",
+  "branch": "people/P17/pub-sync",
+  "commit": "47fa0fe2a62cbe6363629a188288436753f03738",
+  "summary": "Fixed byte-exact remote event immutability checks, expanded remote event validation tests, and corrected test-file execution order.",
+  "files_changed": [
+    "README.md",
+    "groupctl.py",
+    "tests/test_groupctl.py"
+  ],
+  "interface_changes": [
+    "Remote event immutability checks compare raw Git blob bytes.",
+    "Integration tests cover malformed remote events, group ID mismatches, and conflicting contents for duplicate event IDs.",
+    "Direct test-file execution now includes RemoteEventTests."
+  ],
+  "tests_run": [
+    "python -m unittest discover -s tests -v: 19 tests passed",
+    "python tests\\test_groupctl.py: 19 tests passed",
+    "git diff --check: passed"
+  ],
+  "known_issues": [
+    "The complete three-member workflow, including deliberate conflict resolution and finalization, still needs to be demonstrated."
+  ],
+  "proposed_for_integration": true
+}

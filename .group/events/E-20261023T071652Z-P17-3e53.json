@@ -1,0 +1,44 @@
+{
+  "protocol_version": "0.1",
+  "event_id": "E-20261023T071652Z-P17-3e53",
+  "event_type": "change_published",
+  "group_id": "G-12",
+  "person_id": "P17",
+  "created_at": "2026-10-23T07:16:52Z",
+  "related_events": [],
+  "change_id": "C-3f07198",
+  "branch": "people/P17/pub-sync",
+  "commit": "3f07198c647eec5f7f9cc2f18e2e2cb3850c3435",
+  "summary": "Completed the group collaboration helper, remote event validation, portable agent instructions, and finalization workflow.",
+  "files_changed": [
+    ".gitignore",
+    "AGENT_INSTRUCTIONS.md",
+    "README.md",
+    "examples/finding_payload.json",
+    "groupctl.py",
+    "tests/test_groupctl.py",
+    "FINAL_VALIDATION.md",
+    "scripts/run_three_member_demo.py",
+    "specifications/00_group_collaboration_assignment.md",
+    "specifications/01_architecture_and_workflow.md",
+    "specifications/02_repository_contract.md",
+    "specifications/03_event_format_contract.md",
+    "specifications/04_command_reference.md",
+    "specifications/05_command_procedures.md",
+    "specifications/06_agent_behavior_specification.md",
+    "specifications/07_testing_and_finalization.md"
+  ],
+  "interface_changes": [
+    "Added remote event discovery and validation.",
+    "Added collaboration workflow and finalization support.",
+    "Added a three-member local demonstration."
+  ],
+  "tests_run": [
+    "python -m unittest discover -s tests -v: 27 tests passed",
+    "python scripts/run_three_member_demo.py: DEMO SUCCESS"
+  ],
+  "known_issues": [
+    "Live collaboration with independently operated AI agents and GitHub permissions remains to be demonstrated."
+  ],
+  "proposed_for_integration": true
+}
